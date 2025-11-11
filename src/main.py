@@ -29,7 +29,11 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 # --- FastAPI app ---
-app = FastAPI()
+app = FastAPI(
+    title="Boat AI Assistant",
+    description="API that lets you query OpenAI or Claude",
+    version="1.0.0"
+)
 
 # --- Root route (so Render knows the app works) ---
 @app.get("/")
@@ -40,7 +44,7 @@ class PromptRequest(BaseModel):
     prompt: str
     model: str = "openai"  # or "claude"
 
-@app.post("/ask")
+@app.post("/ask", summary="Query a model", description="Sends a prompt to OpenAI or Claude and returns the result.")
 async def ask_ai(req: PromptRequest):
     prompt = req.prompt.strip()
     model = req.model.lower().strip()
