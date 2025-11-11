@@ -31,6 +31,11 @@ anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 # --- FastAPI app ---
 app = FastAPI()
 
+# --- Root route (so Render knows the app works) ---
+@app.get("/")
+def read_root():
+    return {"message": "Hello from boat_ai_assistant!"}
+
 class PromptRequest(BaseModel):
     prompt: str
     model: str = "openai"  # or "claude"
