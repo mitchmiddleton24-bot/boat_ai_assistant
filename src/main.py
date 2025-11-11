@@ -5,6 +5,7 @@ import anthropic
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # --- Load .env ---
 env_path = Path(__file__).resolve().parents[1] / ".env"
@@ -36,13 +37,13 @@ app = FastAPI(
 )
 
 # --- Root route (so Render knows the app works) ---
-@app.get("/")
+@app.get("/", tags=["System"])
 def read_root():
     return {"message": "Hello from boat_ai_assistant!"}
 
 class PromptRequest(BaseModel):
-    prompt: str
-    model: str = "openai"  # or "claude"
+    prompt: str = Field(..., example="What is condition-based maintenance?")
+    model: str = Field(..., example="openai", description="Choose either 'openai' or 'claude'")
 
 @app.post("/ask", summary="Query a model", description="Sends a prompt to OpenAI or Claude and returns the result.")
 async def ask_ai(req: PromptRequest):
