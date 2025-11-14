@@ -2,14 +2,10 @@ import os
 from pathlib import Path
 from openai import OpenAI
 import anthropic
-import data_loader
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from pydantic import BaseModel
 from pydantic import BaseModel, Field
-from fastapi.responses import JSONResponse
-from fastapi import Request
-from claude_formatter import rewrite_with_claude
 
 # --- Load .env ---
 env_path = Path(__file__).resolve().parents[1] / ".env"
@@ -79,52 +75,3 @@ async def ask_ai(req: PromptRequest):
             return {"error": "Invalid model. Use 'openai' or 'claude'."}
     except Exception as e:
         return {"error": str(e)}
-
-@app.get("/internal/status", tags=["Internal"])
-def internal_status():
-    return {"status": "Boat AI Assistant is running."}
-
-@app.get("/internal/models", tags=["Internal"])
-def list_models():
-    return {"models": ["openai", "claude"]}
-
-from data_loader import (
-    get_dummy_emails,
-    get_dummy_transcript,
-    load_email_data,
-    load_subcontractor_data,
-    load_transcript_data,
-    load_stats_summary,
-)
-
-@app.get("/data/emails", tags=["Internal Data"])
-def get_emails():
-    return {"emails": get_dummy_emails()}
-
-@app.get("/data/transcript", tags=["Internal Data"])
-def get_transcript():
-    return {"transcript": get_dummy_transcript()}
-
-@app.get("/data/email_data", tags=["Internal Data"])
-def get_email_data():
-    return JSONResponse(content={"email_data": load_email_data()})
-
-@app.get("/data/subcontractors", tags=["Internal Data"])
-def get_subcontractors():
-    return JSONResponse(content={"subcontractors": load_subcontractor_data()})
-
-@app.get("/data/transcripts", tags=["Internal Data"])
-def get_transcripts():
-    return JSONResponse(content={"transcripts": load_transcript_data()})
-
-@app.get("/data/stats_summary", tags=["Internal Data"])
-def get_stats():
-    return JSONResponse(content={"stats": load_stats_summary()})
-
-@app.post("/rewrite_with_claude", tags=["Claude Formatter"])
-async def rewrite_with_claude_endpoint(request: Request):
-    body = await request.json()
-    raw_text = body.get("raw_text", "")
-    tone = body.get("tone", "executive")
-    result = rewrite_with_claude(raw_text, tone)
-    return {"message": result}
