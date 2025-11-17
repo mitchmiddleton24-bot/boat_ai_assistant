@@ -1,11 +1,16 @@
 import os
-from dotenv import load_dotenv
+import sys
 
-# Always load .env no matter what
-dotenv_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
+# Add inner src to Python path
+sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
+
+from dotenv import load_dotenv
+dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(dotenv_path)
 
-from outlook_reader import read_emails
+# Example usage (change as needed)
+from stat_tracker import track_statistics
 
-emails = read_emails()
-print("Emails read:", emails)
+if __name__ == '__main__':
+    stats = track_statistics()
+    print("Weekly stats:", stats)
