@@ -1,12 +1,22 @@
 import os
-import shutil
+from fastapi import UploadFile
 
-UPLOAD_DIR = "data/uploaded_files"
+BASE_UPLOAD_DIR = "/tmp/uploads"
 
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+def ensure_upload_dir():
+    if not os.path.exists(BASE_UPLOAD_DIR):
+        os.makedirs(BASE_UPLOAD_DIR, exist_ok=True)
 
-def save_uploaded_file(file):
-    file_path = os.path.join(UPLOAD_DIR, file.filename)
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+def save_file(file: UploadFile) -> str:
+    """
+    Save an uploaded file to /tmp/uploads on Render.
+    Returns the full path of the saved file.
+    """
+    ensure_upload_dir()
+
+    file_path = os.path.join(BASE_UPLOAD_DIR, file.filename)
+
+    with open(file_path, "wb") as f:
+        f.write(file.file.read())
+
     return file_path
