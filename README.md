@@ -1,6 +1,7 @@
 # Boat AI Assistant
 
-An AI assistant designed to monitor operations, identify blindspots, and summarize data from Otter.ai meetings and Outlook emails.
+A cloud-based AI system designed to help construction and marine companies analyze meeting transcripts, summarize emails, generate weekly operations reports, and manage subcontractor insights.
+This backend is built with FastAPI, deployed on Render, and integrates with OpenAI, Anthropic, future Outlook OAuth, and future Otter.ai data ingestion.
 
 ## Structure
 - `src/`: Source code
