@@ -1,9 +1,15 @@
-from fastapi import APIRouter, UploadFile, File
-from utils.file_storage import save_uploaded_file
+from fastapi import APIRouter, UploadFile, File, HTTPException
+from src.utils.file_storage import save_file
 
 router = APIRouter()
 
 @router.post("/file")
 async def upload_file(file: UploadFile = File(...)):
-    path = save_uploaded_file(file)
-    return {"message": "File uploaded successfully", "path": path}
+    """
+    Upload a file to local storage.
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    saved_path = await save_file(file)
+    return {"status": "success", "path": saved_path}

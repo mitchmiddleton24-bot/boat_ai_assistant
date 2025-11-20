@@ -1,11 +1,12 @@
 from fastapi import APIRouter
-from models.subcontractor import SubcontractorScore
+from src.services.subcontractor_finder import get_dummy_scores
 
 router = APIRouter()
 
 @router.get("/dummy")
-def get_dummy_scores():
-    return [
-        SubcontractorScore(name="Alpha Concrete", score=92),
-        SubcontractorScore(name="Miller Electrical", score=85),
-    ]
+async def get_dummy_sub_scores():
+    """
+    Return placeholder subcontractor performance scores.
+    """
+    scores = await get_dummy_scores()
+    return {"subcontractor_scores": scores}
