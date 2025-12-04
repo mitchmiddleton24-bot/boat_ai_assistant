@@ -6,11 +6,15 @@ router = APIRouter()
 @router.get("/weekly")
 async def weekly_report():
     """
-    Returns a dummy weekly report.
-    Later you will replace this with real executive-level summaries.
+    Temporary endpoint for a weekly report.
+
+    Right now this just calls a dummy generator that writes a text file
+    into src/data/reports and returns the path. Later we will swap this
+    for a real Outlook plus Otter plus AI summary.
     """
     report_path = generate_dummy_weekly_report()
+
     return {
         "message": "Weekly report generated",
-        "path": report_path
+        "path": report_path,
     }
