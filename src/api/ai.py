@@ -1,13 +1,23 @@
+# src/api/ai.py
+
 from fastapi import APIRouter
-from src.models.prompt import PromptRequest
-from src.services.openai_client import ask_openai
+from pydantic import BaseModel
+from src.services.openai_client import summarize_text
 
 router = APIRouter()
 
+class PromptRequest(BaseModel):
+    prompt: str
+    content: str
+
+
 @router.post("/ask")
-async def ask_ai(prompt: PromptRequest):
+async def ask_ai(req: PromptRequest):
     """
-    Send a prompt to OpenAI (or Anthropic) and return the response.
+    General-purpose AI endpoint for testing the OpenAI connection.
     """
-    answer = await ask_openai(prompt.prompt)
-    return {"response": answer}
+    response = summarize_text(
+        prompt=req.prompt,
+        content=req.content
+    )
+    return {"response": response}
