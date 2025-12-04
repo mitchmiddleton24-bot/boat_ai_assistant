@@ -4,6 +4,7 @@ import os
 
 load_dotenv()
 
+from src.api import graph_endpoints
 from src.api.auth import router as auth_router
 from src.api.ai import router as ai_router
 from src.api.upload import router as upload_router
@@ -23,6 +24,7 @@ app.include_router(upload_router, prefix="/upload", tags=["Upload"])
 app.include_router(reports_router, prefix="/reports", tags=["Reports"])
 app.include_router(subcontractor_router, prefix="/subcontractors", tags=["Subcontractors"])
 app.include_router(weekly_reports_router, prefix="/weekly", tags=["Weekly"])
+app.include_router(graph_endpoints.router)
     
 
 @app.get("/")
