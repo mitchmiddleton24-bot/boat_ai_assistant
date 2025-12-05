@@ -114,7 +114,7 @@ Return the final report as plain text.
     """
 
     resp = claude_client.messages.create(
-        model="claude-sonnet-4.5-20250229",
+        model="claude-sonnet-4-5",
         max_tokens=1200,
         temperature=0.2,
         messages=[{"role": "user", "content": prompt}],
