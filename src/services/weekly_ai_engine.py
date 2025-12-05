@@ -21,22 +21,31 @@ claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 def fetch_emails_last_7_days() -> List[Dict[str, Any]]:
     """
     Fetch emails and keep only those from the past 7 days.
+    Ensures all datetimes are timezone-aware (UTC).
     """
-    today = datetime.datetime.utcnow()
-    cutoff = today - datetime.timedelta(days=7)
+    utc = datetime.timezone.utc
+    now_utc = datetime.datetime.now(utc)
+    cutoff = now_utc - datetime.timedelta(days=7)
 
-    raw_emails = get_recent_emails(top=50)  # adjustable
+    raw_emails = get_recent_emails(top=50)
     filtered = []
 
     for msg in raw_emails:
+        dt_str = msg["receivedDateTime"]
+
+        # Convert '2025-12-03T13:13:31Z' to an aware datetime
         dt = datetime.datetime.fromisoformat(
-            msg["receivedDateTime"].replace("Z", "+00:00")
+            dt_str.replace("Z", "+00:00")
         )
+
+        # Ensure dt is aware, just in case
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=utc)
+
         if dt >= cutoff:
             filtered.append(msg)
 
     return filtered
-
 
 def extract_structured_items_gpt(emails: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
