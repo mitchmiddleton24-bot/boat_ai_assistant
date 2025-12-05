@@ -8,6 +8,7 @@ from openai import OpenAI
 import anthropic
 
 from src.services.ms_graph_client import get_recent_emails
+from src.services.ms_graph_client import send_email
 
 
 # Load API keys
@@ -139,3 +140,20 @@ def generate_weekly_ai_report() -> Dict[str, Any]:
         "structured_data": structured,
         "final_report": final_report,
     }
+
+def generate_and_email_weekly_report(to_addresses: list[str]) -> dict:
+    """
+    1. Generate the weekly AI report.
+    2. Email the final report text to the given recipients.
+    Returns the same dict as generate_weekly_ai_report, plus a 'sent_to' field.
+    """
+    result = generate_weekly_ai_report()
+    final_report_text = result["final_report"]
+
+    subject = "Weekly Operations AI Report"
+    body_text = final_report_text
+
+    send_email(subject=subject, body_text=body_text, to_addresses=to_addresses)
+
+    result["sent_to"] = to_addresses
+    return result

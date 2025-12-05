@@ -83,3 +83,41 @@ def get_recent_emails(top: int = 10) -> List[Dict[str, Any]]:
         )
 
     return simplified
+
+def send_email(subject: str, body_text: str, to_addresses: list[str]) -> None:
+    """
+    Send an email using Microsoft Graph from the configured user.
+    Uses application permissions and MS_* environment variables.
+    """
+    if not USER_ID:
+        raise RuntimeError("MS_GRAPH_USER_ID is not set")
+
+    token = _get_access_token()
+
+    url = f"{GRAPH_URL}/users/{USER_ID}/sendMail"
+
+    message = {
+        "message": {
+            "subject": subject,
+            "body": {
+                "contentType": "Text",
+                "content": body_text,
+            },
+            "toRecipients": [
+                {"emailAddress": {"address": addr}} for addr in to_addresses
+            ],
+        },
+        "saveToSentItems": True,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.post(url, headers=headers, json=message, timeout=30)
+
+    if response.status_code not in (202, 200):
+        raise RuntimeError(
+            f"Graph sendMail error {response.status_code}: {response.text}"
+        )
