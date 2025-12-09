@@ -7,8 +7,10 @@ from typing import List, Dict, Any
 from openai import OpenAI
 import anthropic
 
-from src.services.ms_graph_client import get_recent_emails
-from src.services.ms_graph_client import send_email
+from src.services.ms_graph_client import (
+    get_recent_inbox_and_sent_emails,
+    send_email,
+)
 
 
 # Load API keys
@@ -21,25 +23,22 @@ claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
 def fetch_emails_last_7_days() -> List[Dict[str, Any]]:
     """
-    Fetch emails and keep only those from the past 7 days.
-    Ensures all datetimes are timezone-aware (UTC).
+    Fetch emails from Inbox and Sent Items, keep only those from the past 7 days.
+    Ensures all datetimes are timezone aware (UTC).
     """
     utc = datetime.timezone.utc
     now_utc = datetime.datetime.now(utc)
     cutoff = now_utc - datetime.timedelta(days=7)
 
-    raw_emails = get_recent_emails(top=50)
-    filtered = []
+    raw_emails = get_recent_inbox_and_sent_emails(top=200)
+    filtered: List[Dict[str, Any]] = []
 
     for msg in raw_emails:
-        dt_str = msg["receivedDateTime"]
+        dt_str = msg.get("receivedDateTime") or msg.get("sentDateTime")
+        if not dt_str:
+            continue
 
-        # Convert '2025-12-03T13:13:31Z' to an aware datetime
-        dt = datetime.datetime.fromisoformat(
-            dt_str.replace("Z", "+00:00")
-        )
-
-        # Ensure dt is aware, just in case
+        dt = datetime.datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=utc)
 
@@ -48,31 +47,102 @@ def fetch_emails_last_7_days() -> List[Dict[str, Any]]:
 
     return filtered
 
-def extract_structured_items_gpt(emails: List[Dict[str, Any]]) -> Dict[str, Any]:
+def group_emails_into_conversations(
+    emails: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
     """
-    Use GPT to extract structured insights from email metadata.
-    Later we can pass the full body.
+    Group emails into conversation threads by conversationId.
+    Sort messages inside each conversation by time.
+    """
+    conv_map: Dict[str, List[Dict[str, Any]]] = {}
+
+    for msg in emails:
+        conv_id = msg.get("conversationId") or "no-conversation-id"
+        conv_map.setdefault(conv_id, []).append(msg)
+
+    conversations: List[Dict[str, Any]] = []
+
+    for conv_id, msgs in conv_map.items():
+        # sort by sent or received time
+        def sort_key(m: Dict[str, Any]):
+            dt_str = m.get("sentDateTime") or m.get("receivedDateTime")
+            if not dt_str:
+                return ""
+            return dt_str
+
+        msgs_sorted = sorted(msgs, key=sort_key)
+
+        conversations.append(
+            {
+                "conversationId": conv_id,
+                "messages": msgs_sorted,
+            }
+        )
+
+    return conversations
+
+def extract_structured_items_gpt(
+    conversations: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Use GPT to extract structured insights from conversation threads.
+
+    For each conversation, we want:
+    - high level topic
+    - main participants
+    - status: open or closed
+    - follow_up_needed: true/false
+    - who_owes_next: "company", "external", or "none"
+    - urgency 1 to 5
+    - short summary
+
+    GPT sees both inbound and outbound messages in each thread.
     """
     prompt = f"""
 You are an AI operations analyst.
 
-You are given a JSON list of email metadata (subject, sender, timestamps).
-Extract structured information needed for a weekly construction or service-company report.
+You are given JSON-like data representing email conversation threads.
+Each thread contains messages with:
+- from (email)
+- to (list of emails)
+- subject
+- bodyPreview
+- folder ("inbox" or "sent")
+- timestamps
+- conversationId
 
-For each email, extract:
-- subcontractor or responsible party (guess if needed)
-- issue type (delay, scheduling, approval, materials, customer complaint, update)
-- urgency from 1 to 5
-- project reference if mentioned
-- summary of what the email represents
+For each conversation, do the following:
 
-Return a JSON object with fields:
-- items: list of extracted items
-- subcontractors: list of unique subcontractors or parties
-- issues_by_category: {{}}
+1. Identify the main topic or purpose of the conversation.
+2. Identify main external parties (subcontractors, customers, vendors).
+3. Decide if the conversation is effectively "open" or "closed".
+   - "open" means there is likely an outstanding issue, question, or task.
+   - "closed" means the matter appears resolved or no further action is needed.
+4. Decide if a follow up from the company is appropriate:
+   - follow_up_needed = true only if it is reasonable that the company should respond again.
+   - follow_up_needed = false if the last message closed the loop, or if silence is acceptable.
+5. Determine who, if anyone, "owes" the next reply:
+   - "company" if the company should respond next.
+   - "external" if the subcontractor, customer, or vendor should respond next.
+   - "none" if the thread is closed.
+6. Rate urgency from 1 (low) to 5 (critical).
+7. Provide a short operational summary of the conversation.
 
-Here is the email data:
-{emails}
+Return a single JSON-style Python dict with:
+- conversations: list of items, each with:
+  - conversationId
+  - topic
+  - main_parties
+  - status  ("open" or "closed")
+  - follow_up_needed  (true/false)
+  - who_owes_next  ("company", "external", "none")
+  - urgency  (1 to 5)
+  - summary  (2 to 4 sentences)
+- overall_insights: brief list of general observations across all conversations
+- follow_ups_needed: list of the conversationIds where follow_up_needed is true
+
+Here is the conversation data:
+{conversations}
     """
 
     resp = openai_client.chat.completions.create(
@@ -84,8 +154,11 @@ Here is the email data:
     try:
         return eval(resp.choices[0].message.content)
     except Exception:
-        return {"items": [], "subcontractors": [], "issues_by_category": {}}
-
+        return {
+            "conversations": [],
+            "overall_insights": [],
+            "follow_ups_needed": [],
+        }
 
 def generate_weekly_report_claude(structured: Dict[str, Any]) -> str:
     """
@@ -123,20 +196,22 @@ Return the final report as plain text.
 
     return resp.content[0].text
 
-
 def generate_weekly_ai_report() -> Dict[str, Any]:
     """
     Main orchestrator:
-    1. Fetch last 7 days of emails
-    2. Extract structured items with GPT
-    3. Generate executive summary with Claude
+    1. Fetch last 7 days of emails (Inbox + Sent)
+    2. Group them into conversation threads
+    3. Extract structured items with GPT, including follow up needs
+    4. Generate executive summary with Claude
     """
     emails = fetch_emails_last_7_days()
-    structured = extract_structured_items_gpt(emails)
+    conversations = group_emails_into_conversations(emails)
+    structured = extract_structured_items_gpt(conversations)
     final_report = generate_weekly_report_claude(structured)
 
     return {
         "email_count": len(emails),
+        "conversation_count": len(conversations),
         "structured_data": structured,
         "final_report": final_report,
     }
