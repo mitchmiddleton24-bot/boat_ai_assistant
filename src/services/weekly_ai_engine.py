@@ -3,6 +3,8 @@
 from datetime import datetime, timedelta
 import os
 from typing import List, Dict, Any
+from src.models.user_profile import UserProfile
+from src.services.user_profile_store import get_default_user_profile
 
 from openai import OpenAI
 import anthropic
@@ -32,11 +34,6 @@ claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 # New: basic user profile used for thread classification
 REPORT_USER_EMAIL = os.getenv("REPORT_USER_EMAIL") or os.getenv("MS_GRAPH_USER_ID")
 
-DEFAULT_USER_PROFILE = {
-    "user_email": REPORT_USER_EMAIL,
-    "follow_up_threshold_hours": 48,   # over this, nudge to follow up
-    "stale_info_days": 7,              # older than this and no action -> informational stale
-}
 
 def fetch_emails_last_7_days() -> List[Dict[str, Any]]:
     """
@@ -106,7 +103,7 @@ from datetime import datetime, timedelta
 
 def classify_conversations(
     conversations: List[Dict[str, Any]],
-    user_profile: Dict[str, Any],
+    user_profile: UserProfile,
 ) -> List[Dict[str, Any]]:
     """
     Classify each conversation thread into:
@@ -304,36 +301,28 @@ Return the final report as plain text.
 
     return resp.content[0].text
 
-def generate_weekly_ai_report() -> Dict[str, Any]:
-    """
-    Main orchestrator:
-    1. Fetch last 7 days of emails (Inbox + Sent)
-    2. Group them into conversation threads
-    3. Classify threads with Python logic (waiting_on, follow_up_suggested, status)
-    4. Extract higher level items with GPT, including follow up needs
-    5. Generate executive summary with Claude
-    """
-    emails = fetch_emails_last_7_days()
+def generate_weekly_ai_report(user_id: str | None = None) -> Dict[str, Any]:
+    profile = get_default_user_profile() if user_id is None else get_user_profile_by_id(user_id)
+
+    emails = fetch_emails_last_7_days()   # for now still your mailbox
     conversations = group_emails_into_conversations(emails)
 
-    # New: deterministic thread classification
-    thread_status = classify_conversations(conversations, DEFAULT_USER_PROFILE)
+    thread_status = classify_conversations(conversations, profile)
 
-    # Existing: GPT based structuring of conversations
     structured = extract_structured_items_gpt(conversations)
-
-    # Inject Python side thread intelligence so Claude can see it
     structured["python_thread_status"] = thread_status
 
     final_report = generate_weekly_report_claude(structured)
 
     return {
+        "user_id": profile.id,
         "email_count": len(emails),
         "conversation_count": len(conversations),
         "thread_status": thread_status,
         "structured": structured,
         "final_report": final_report,
     }
+
 
 def generate_and_email_weekly_report(to_addresses: list[str]) -> dict:
     """
