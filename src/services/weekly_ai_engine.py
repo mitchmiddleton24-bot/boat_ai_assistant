@@ -98,7 +98,9 @@ def group_emails_into_conversations(
 
     return conversations
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
+
+from datetime import datetime, timedelta
 
 def classify_conversations(
     conversations: List[Dict[str, Any]],
@@ -111,13 +113,15 @@ def classify_conversations(
     - status: 'open', 'informational', 'stale'
     - age_hours: float
 
-    This is deterministic logic that does not depend on GPT.
+    Uses naive UTC datetimes to avoid timezone issues.
     """
     user_email = (user_profile.get("user_email") or "").lower()
     follow_up_threshold_hours = user_profile.get("follow_up_threshold_hours", 48)
     stale_info_days = user_profile.get("stale_info_days", 7)
 
-    now_utc = datetime.now(timezone.utc)
+    # Current time in UTC (naive)
+    now_utc = datetime.utcnow()
+
     results: List[Dict[str, Any]] = []
 
     for conv in conversations:
@@ -143,8 +147,12 @@ def classify_conversations(
         dt_str = last_msg.get("sentDateTime") or last_msg.get("receivedDateTime")
         last_ts = None
         if dt_str:
-            # Graph returns ISO 8601 with Z, example: 2025-01-20T14:22:33Z
-            last_ts = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+            # Remove trailing Z or timezone info, parse as naive
+            cleaned = dt_str.replace("Z", "")
+            try:
+                last_ts = datetime.fromisoformat(cleaned)
+            except ValueError:
+                last_ts = now_utc
         if last_ts is None:
             last_ts = now_utc
 
@@ -152,8 +160,6 @@ def classify_conversations(
         age_hours = age_delta.total_seconds() / 3600.0
 
         # Determine direction of last message
-        # If you are the sender, thread is waiting on "them"
-        # If you are only a recipient, thread is waiting on "you"
         if user_email and last_from == user_email:
             waiting_on = "them"
         elif user_email and user_email in last_to:
@@ -166,12 +172,10 @@ def classify_conversations(
             follow_up_suggested = True
             status = "open"
         elif waiting_on == "you":
-            # You have not replied yet
             follow_up_suggested = True
             status = "open"
         else:
             follow_up_suggested = False
-            # If nothing has happened for a long time, treat as stale informational
             if age_delta >= timedelta(days=stale_info_days):
                 status = "stale"
             else:
@@ -185,9 +189,9 @@ def classify_conversations(
                 "last_to": last_to,
                 "last_timestamp": last_ts.isoformat(),
                 "age_hours": age_hours,
-                "waiting_on": waiting_on,              # 'you', 'them', 'none'
+                "waiting_on": waiting_on,
                 "follow_up_suggested": follow_up_suggested,
-                "status": status,                      # 'open', 'informational', 'stale'
+                "status": status,
             }
         )
 
