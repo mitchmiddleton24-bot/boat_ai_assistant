@@ -20,6 +20,23 @@ CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
+# src/services/weekly_ai_engine.py
+
+# Existing
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
+
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
+claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+
+# New: basic user profile used for thread classification
+REPORT_USER_EMAIL = os.getenv("REPORT_USER_EMAIL") or os.getenv("MS_GRAPH_USER_ID")
+
+DEFAULT_USER_PROFILE = {
+    "user_email": REPORT_USER_EMAIL,
+    "follow_up_threshold_hours": 48,   # over this, nudge to follow up
+    "stale_info_days": 7,              # older than this and no action -> informational stale
+}
 
 def fetch_emails_last_7_days() -> List[Dict[str, Any]]:
     """
@@ -80,6 +97,101 @@ def group_emails_into_conversations(
         )
 
     return conversations
+
+from datetime import datetime, timezone, timedelta
+
+def classify_conversations(
+    conversations: List[Dict[str, Any]],
+    user_profile: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """
+    Classify each conversation thread into:
+    - waiting_on: 'you', 'them', or 'none'
+    - follow_up_suggested: bool
+    - status: 'open', 'informational', 'stale'
+    - age_hours: float
+
+    This is deterministic logic that does not depend on GPT.
+    """
+    user_email = (user_profile.get("user_email") or "").lower()
+    follow_up_threshold_hours = user_profile.get("follow_up_threshold_hours", 48)
+    stale_info_days = user_profile.get("stale_info_days", 7)
+
+    now_utc = datetime.now(timezone.utc)
+    results: List[Dict[str, Any]] = []
+
+    for conv in conversations:
+        conv_id = conv.get("conversationId")
+        messages = conv.get("messages", [])
+
+        if not messages:
+            continue
+
+        # Take subject from most recent message with a subject
+        subject = None
+        for m in reversed(messages):
+            if m.get("subject"):
+                subject = m["subject"]
+                break
+
+        # Last message in time
+        last_msg = messages[-1]
+        last_from = (last_msg.get("from") or "").lower()
+        last_to = [addr.lower() for addr in (last_msg.get("to") or [])]
+
+        # Choose a timestamp, preferring sentDateTime then receivedDateTime
+        dt_str = last_msg.get("sentDateTime") or last_msg.get("receivedDateTime")
+        last_ts = None
+        if dt_str:
+            # Graph returns ISO 8601 with Z, example: 2025-01-20T14:22:33Z
+            last_ts = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        if last_ts is None:
+            last_ts = now_utc
+
+        age_delta = now_utc - last_ts
+        age_hours = age_delta.total_seconds() / 3600.0
+
+        # Determine direction of last message
+        # If you are the sender, thread is waiting on "them"
+        # If you are only a recipient, thread is waiting on "you"
+        if user_email and last_from == user_email:
+            waiting_on = "them"
+        elif user_email and user_email in last_to:
+            waiting_on = "you"
+        else:
+            waiting_on = "none"
+
+        # Basic status logic
+        if waiting_on == "them" and age_hours >= follow_up_threshold_hours:
+            follow_up_suggested = True
+            status = "open"
+        elif waiting_on == "you":
+            # You have not replied yet
+            follow_up_suggested = True
+            status = "open"
+        else:
+            follow_up_suggested = False
+            # If nothing has happened for a long time, treat as stale informational
+            if age_delta >= timedelta(days=stale_info_days):
+                status = "stale"
+            else:
+                status = "informational"
+
+        results.append(
+            {
+                "conversationId": conv_id,
+                "subject": subject,
+                "last_from": last_from,
+                "last_to": last_to,
+                "last_timestamp": last_ts.isoformat(),
+                "age_hours": age_hours,
+                "waiting_on": waiting_on,              # 'you', 'them', 'none'
+                "follow_up_suggested": follow_up_suggested,
+                "status": status,                      # 'open', 'informational', 'stale'
+            }
+        )
+
+    return results
 
 def extract_structured_items_gpt(
     conversations: List[Dict[str, Any]]
@@ -201,18 +313,29 @@ def generate_weekly_ai_report() -> Dict[str, Any]:
     Main orchestrator:
     1. Fetch last 7 days of emails (Inbox + Sent)
     2. Group them into conversation threads
-    3. Extract structured items with GPT, including follow up needs
-    4. Generate executive summary with Claude
+    3. Classify threads with Python logic (waiting_on, follow_up_suggested, status)
+    4. Extract higher level items with GPT, including follow up needs
+    5. Generate executive summary with Claude
     """
     emails = fetch_emails_last_7_days()
     conversations = group_emails_into_conversations(emails)
+
+    # New: deterministic thread classification
+    thread_status = classify_conversations(conversations, DEFAULT_USER_PROFILE)
+
+    # Existing: GPT based structuring of conversations
     structured = extract_structured_items_gpt(conversations)
+
+    # Inject Python side thread intelligence so Claude can see it
+    structured["python_thread_status"] = thread_status
+
     final_report = generate_weekly_report_claude(structured)
 
     return {
         "email_count": len(emails),
         "conversation_count": len(conversations),
-        "structured_data": structured,
+        "thread_status": thread_status,
+        "structured": structured,
         "final_report": final_report,
     }
 
