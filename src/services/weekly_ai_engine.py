@@ -4,7 +4,10 @@ from datetime import datetime, timedelta
 import os
 from typing import List, Dict, Any
 from src.models.user_profile import UserProfile
-from src.services.user_profile_store import get_default_user_profile
+from src.services.user_profile_store import (
+    get_default_user_profile,
+    get_user_profile_by_id,
+)
 
 from openai import OpenAI
 import anthropic
@@ -112,9 +115,9 @@ def classify_conversations(
     - status: 'open', 'informational', 'stale'
     - age_hours: float
     """
-    user_email = (user_profile.get("user_email") or "").lower()
-    follow_up_threshold_hours = user_profile.get("follow_up_threshold_hours", 48)
-    stale_info_days = user_profile.get("stale_info_days", 7)
+    user_email = (user_profile.primary_email or "").lower()
+    follow_up_threshold_hours = user_profile.follow_up_threshold_hours
+    stale_info_days = user_profile.stale_info_days
 
     now_utc = datetime.utcnow()
     results: List[Dict[str, Any]] = []
