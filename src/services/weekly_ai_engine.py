@@ -1,6 +1,6 @@
 # src/services/weekly_ai_engine.py
 
-import datetime
+from datetime import datetime, timedelta
 import os
 from typing import List, Dict, Any
 
@@ -41,11 +41,10 @@ DEFAULT_USER_PROFILE = {
 def fetch_emails_last_7_days() -> List[Dict[str, Any]]:
     """
     Fetch emails from Inbox and Sent Items, keep only those from the past 7 days.
-    Ensures all datetimes are timezone aware (UTC).
+    Uses naive UTC datetimes.
     """
-    utc = datetime.timezone.utc
-    now_utc = datetime.datetime.now(utc)
-    cutoff = now_utc - datetime.timedelta(days=7)
+    now_utc = datetime.utcnow()
+    cutoff = now_utc - timedelta(days=7)
 
     raw_emails = get_recent_inbox_and_sent_emails(top=200)
     filtered: List[Dict[str, Any]] = []
@@ -55,11 +54,14 @@ def fetch_emails_last_7_days() -> List[Dict[str, Any]]:
         if not dt_str:
             continue
 
-        dt = datetime.datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=utc)
+        # Remove trailing Z if present
+        cleaned = dt_str.replace("Z", "")
+        try:
+            msg_dt = datetime.fromisoformat(cleaned)
+        except ValueError:
+            continue
 
-        if dt >= cutoff:
+        if msg_dt >= cutoff:
             filtered.append(msg)
 
     return filtered
@@ -112,16 +114,12 @@ def classify_conversations(
     - follow_up_suggested: bool
     - status: 'open', 'informational', 'stale'
     - age_hours: float
-
-    Uses naive UTC datetimes to avoid timezone issues.
     """
     user_email = (user_profile.get("user_email") or "").lower()
     follow_up_threshold_hours = user_profile.get("follow_up_threshold_hours", 48)
     stale_info_days = user_profile.get("stale_info_days", 7)
 
-    # Current time in UTC (naive)
     now_utc = datetime.utcnow()
-
     results: List[Dict[str, Any]] = []
 
     for conv in conversations:
@@ -131,35 +129,29 @@ def classify_conversations(
         if not messages:
             continue
 
-        # Take subject from most recent message with a subject
         subject = None
         for m in reversed(messages):
             if m.get("subject"):
                 subject = m["subject"]
                 break
 
-        # Last message in time
         last_msg = messages[-1]
         last_from = (last_msg.get("from") or "").lower()
         last_to = [addr.lower() for addr in (last_msg.get("to") or [])]
 
-        # Choose a timestamp, preferring sentDateTime then receivedDateTime
         dt_str = last_msg.get("sentDateTime") or last_msg.get("receivedDateTime")
-        last_ts = None
         if dt_str:
-            # Remove trailing Z or timezone info, parse as naive
             cleaned = dt_str.replace("Z", "")
             try:
                 last_ts = datetime.fromisoformat(cleaned)
             except ValueError:
                 last_ts = now_utc
-        if last_ts is None:
+        else:
             last_ts = now_utc
 
         age_delta = now_utc - last_ts
         age_hours = age_delta.total_seconds() / 3600.0
 
-        # Determine direction of last message
         if user_email and last_from == user_email:
             waiting_on = "them"
         elif user_email and user_email in last_to:
@@ -167,7 +159,6 @@ def classify_conversations(
         else:
             waiting_on = "none"
 
-        # Basic status logic
         if waiting_on == "them" and age_hours >= follow_up_threshold_hours:
             follow_up_suggested = True
             status = "open"
@@ -196,6 +187,7 @@ def classify_conversations(
         )
 
     return results
+
 
 def extract_structured_items_gpt(
     conversations: List[Dict[str, Any]]
