@@ -12,6 +12,7 @@ from src.api.reports import router as reports_router
 from src.api.subcontractors import router as subcontractor_router
 from src.api.weekly_reports import router as weekly_reports_router
 from src.api import weekly_ai_reports
+from src.api import outlook_auth 
 
 app = FastAPI(
     title="Boat AI Assistant",
@@ -27,6 +28,7 @@ app.include_router(subcontractor_router, prefix="/subcontractors", tags=["Subcon
 app.include_router(weekly_reports_router, prefix="/weekly", tags=["Weekly"])
 app.include_router(graph_endpoints.router)
 app.include_router(weekly_ai_reports.router)
+app.include_router(outlook_auth.router)
 
 
 @app.get("/")
