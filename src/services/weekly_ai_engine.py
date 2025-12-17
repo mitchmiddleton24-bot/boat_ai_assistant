@@ -1,52 +1,56 @@
 # src/services/weekly_ai_engine.py
 
+from __future__ import annotations
+
 from datetime import datetime, timedelta
 import os
-from typing import List, Dict, Any
-from src.models.user_profile import UserProfile
-from src.services.user_profile_store import (
-    get_default_user_profile,
-    get_user_profile_by_id,
-)
+from typing import List, Dict, Any, Optional
 
 from openai import OpenAI
 import anthropic
 
+from src.models.user_profile import UserProfile
+from src.services.user_profile_store import (
+    get_all_connected_users,
+    get_user_profile_by_id,
+)
 from src.services.ms_graph_client import (
     get_recent_inbox_and_sent_emails,
     send_email,
 )
 
-
-# Load API keys
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 
-# src/services/weekly_ai_engine.py
 
-# Existing
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
+def _pick_profile(user_id: Optional[str]) -> UserProfile:
+    if user_id:
+        p = get_user_profile_by_id(user_id)
+        if not p:
+            raise RuntimeError(f"No user profile found for user_id={user_id}")
+        if not p.outlook_connected:
+            raise RuntimeError(f"User {user_id} exists but is not Outlook-connected")
+        return p
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
-claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+    users = get_all_connected_users()
+    if not users:
+        raise RuntimeError("No Outlook-connected users found. Connect an account first.")
+    return users[0]
 
-# New: basic user profile used for thread classification
-REPORT_USER_EMAIL = os.getenv("REPORT_USER_EMAIL") or os.getenv("MS_GRAPH_USER_ID")
+
+def _get_delegated_access_token(profile: UserProfile) -> Optional[str]:
+    tokens = profile.outlook_tokens or {}
+    return tokens.get("access_token")
 
 
-def fetch_emails_last_7_days() -> List[Dict[str, Any]]:
-    """
-    Fetch emails from Inbox and Sent Items, keep only those from the past 7 days.
-    Uses naive UTC datetimes.
-    """
+def fetch_emails_last_7_days(access_token: Optional[str]) -> List[Dict[str, Any]]:
     now_utc = datetime.utcnow()
     cutoff = now_utc - timedelta(days=7)
 
-    raw_emails = get_recent_inbox_and_sent_emails(top=200)
+    raw_emails = get_recent_inbox_and_sent_emails(top=200, access_token=access_token)
     filtered: List[Dict[str, Any]] = []
 
     for msg in raw_emails:
@@ -54,11 +58,10 @@ def fetch_emails_last_7_days() -> List[Dict[str, Any]]:
         if not dt_str:
             continue
 
-        # Remove trailing Z if present
         cleaned = dt_str.replace("Z", "")
         try:
             msg_dt = datetime.fromisoformat(cleaned)
-        except ValueError:
+        except Exception:
             continue
 
         if msg_dt >= cutoff:
@@ -66,15 +69,9 @@ def fetch_emails_last_7_days() -> List[Dict[str, Any]]:
 
     return filtered
 
-def group_emails_into_conversations(
-    emails: List[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
-    """
-    Group emails into conversation threads by conversationId.
-    Sort messages inside each conversation by time.
-    """
-    conv_map: Dict[str, List[Dict[str, Any]]] = {}
 
+def group_emails_into_conversations(emails: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    conv_map: Dict[str, List[Dict[str, Any]]] = {}
     for msg in emails:
         conv_id = msg.get("conversationId") or "no-conversation-id"
         conv_map.setdefault(conv_id, []).append(msg)
@@ -82,264 +79,102 @@ def group_emails_into_conversations(
     conversations: List[Dict[str, Any]] = []
 
     for conv_id, msgs in conv_map.items():
-        # sort by sent or received time
-        def sort_key(m: Dict[str, Any]):
-            dt_str = m.get("sentDateTime") or m.get("receivedDateTime")
-            if not dt_str:
-                return ""
-            return dt_str
+        def sort_key(m: Dict[str, Any]) -> str:
+            return m.get("sentDateTime") or m.get("receivedDateTime") or ""
 
         msgs_sorted = sorted(msgs, key=sort_key)
-
         conversations.append(
             {
-                "conversationId": conv_id,
+                "conversation_id": conv_id,
                 "messages": msgs_sorted,
+                "count": len(msgs_sorted),
             }
         )
 
+    conversations.sort(key=lambda c: c["count"], reverse=True)
     return conversations
 
-from datetime import datetime, timedelta
 
-from datetime import datetime, timedelta
+def _format_prompt(profile: UserProfile, conversations: List[Dict[str, Any]]) -> str:
+    # Keep it simple and deterministic. You can expand later.
+    lines: List[str] = []
+    lines.append(f"Generate a weekly executive summary for: {profile.display_name} ({profile.email})")
+    lines.append("Use plain text, short sections, and be direct.")
+    lines.append("")
+    lines.append(f"Total conversations: {len(conversations)}")
+    lines.append("")
 
-def classify_conversations(
-    conversations: List[Dict[str, Any]],
-    user_profile: UserProfile,
-) -> List[Dict[str, Any]]:
-    """
-    Classify each conversation thread into:
-    - waiting_on: 'you', 'them', or 'none'
-    - follow_up_suggested: bool
-    - status: 'open', 'informational', 'stale'
-    - age_hours: float
-    """
-    user_email = (user_profile.primary_email or "").lower()
-    follow_up_threshold_hours = user_profile.follow_up_threshold_hours
-    stale_info_days = user_profile.stale_info_days
+    for i, conv in enumerate(conversations[:25], start=1):
+        lines.append(f"Conversation {i} (messages={conv['count']}):")
+        for m in conv["messages"][-5:]:
+            subj = m.get("subject", "")
+            prev = m.get("bodyPreview", "")
+            frm = (m.get("from") or {}).get("emailAddress", {}).get("address", "")
+            lines.append(f"- From: {frm} | Subject: {subj} | Preview: {prev}")
+        lines.append("")
 
-    now_utc = datetime.utcnow()
-    results: List[Dict[str, Any]] = []
-
-    for conv in conversations:
-        conv_id = conv.get("conversationId")
-        messages = conv.get("messages", [])
-
-        if not messages:
-            continue
-
-        subject = None
-        for m in reversed(messages):
-            if m.get("subject"):
-                subject = m["subject"]
-                break
-
-        last_msg = messages[-1]
-        last_from = (last_msg.get("from") or "").lower()
-        last_to = [addr.lower() for addr in (last_msg.get("to") or [])]
-
-        dt_str = last_msg.get("sentDateTime") or last_msg.get("receivedDateTime")
-        if dt_str:
-            cleaned = dt_str.replace("Z", "")
-            try:
-                last_ts = datetime.fromisoformat(cleaned)
-            except ValueError:
-                last_ts = now_utc
-        else:
-            last_ts = now_utc
-
-        age_delta = now_utc - last_ts
-        age_hours = age_delta.total_seconds() / 3600.0
-
-        if user_email and last_from == user_email:
-            waiting_on = "them"
-        elif user_email and user_email in last_to:
-            waiting_on = "you"
-        else:
-            waiting_on = "none"
-
-        if waiting_on == "them" and age_hours >= follow_up_threshold_hours:
-            follow_up_suggested = True
-            status = "open"
-        elif waiting_on == "you":
-            follow_up_suggested = True
-            status = "open"
-        else:
-            follow_up_suggested = False
-            if age_delta >= timedelta(days=stale_info_days):
-                status = "stale"
-            else:
-                status = "informational"
-
-        results.append(
-            {
-                "conversationId": conv_id,
-                "subject": subject,
-                "last_from": last_from,
-                "last_to": last_to,
-                "last_timestamp": last_ts.isoformat(),
-                "age_hours": age_hours,
-                "waiting_on": waiting_on,
-                "follow_up_suggested": follow_up_suggested,
-                "status": status,
-            }
-        )
-
-    return results
+    lines.append("Output sections:")
+    lines.append("1) Key Wins")
+    lines.append("2) Risks and Blind Spots")
+    lines.append("3) Follow Ups Needed")
+    lines.append("4) Suggested Next Actions")
+    return "\n".join(lines)
 
 
-def extract_structured_items_gpt(
-    conversations: List[Dict[str, Any]]
-) -> Dict[str, Any]:
-    """
-    Use GPT to extract structured insights from conversation threads.
-
-    For each conversation, we want:
-    - high level topic
-    - main participants
-    - status: open or closed
-    - follow_up_needed: true/false
-    - who_owes_next: "company", "external", or "none"
-    - urgency 1 to 5
-    - short summary
-
-    GPT sees both inbound and outbound messages in each thread.
-    """
-    prompt = f"""
-You are an AI operations analyst.
-
-You are given JSON-like data representing email conversation threads.
-Each thread contains messages with:
-- from (email)
-- to (list of emails)
-- subject
-- bodyPreview
-- folder ("inbox" or "sent")
-- timestamps
-- conversationId
-
-For each conversation, do the following:
-
-1. Identify the main topic or purpose of the conversation.
-2. Identify main external parties (subcontractors, customers, vendors).
-3. Decide if the conversation is effectively "open" or "closed".
-   - "open" means there is likely an outstanding issue, question, or task.
-   - "closed" means the matter appears resolved or no further action is needed.
-4. Decide if a follow up from the company is appropriate:
-   - follow_up_needed = true only if it is reasonable that the company should respond again.
-   - follow_up_needed = false if the last message closed the loop, or if silence is acceptable.
-5. Determine who, if anyone, "owes" the next reply:
-   - "company" if the company should respond next.
-   - "external" if the subcontractor, customer, or vendor should respond next.
-   - "none" if the thread is closed.
-6. Rate urgency from 1 (low) to 5 (critical).
-7. Provide a short operational summary of the conversation.
-
-Return a single JSON-style Python dict with:
-- conversations: list of items, each with:
-  - conversationId
-  - topic
-  - main_parties
-  - status  ("open" or "closed")
-  - follow_up_needed  (true/false)
-  - who_owes_next  ("company", "external", "none")
-  - urgency  (1 to 5)
-  - summary  (2 to 4 sentences)
-- overall_insights: brief list of general observations across all conversations
-- follow_ups_needed: list of the conversationIds where follow_up_needed is true
-
-Here is the conversation data:
-{conversations}
-    """
-
-    resp = openai_client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2,
-    )
-
-    try:
-        return eval(resp.choices[0].message.content)
-    except Exception:
-        return {
-            "conversations": [],
-            "overall_insights": [],
-            "follow_ups_needed": [],
-        }
-
-def generate_weekly_report_claude(structured: Dict[str, Any]) -> str:
-    """
-    Claude produces the final polished executive summary.
-    """
-    prompt = f"""
-You are an expert operations analyst and executive report writer.
-
-You are given structured operational insights extracted from emails:
-{structured}
-
-Create a polished, professional weekly report that includes:
-
-1. Executive Summary (5-8 sentences)
-2. Subcontractor Performance Overview
-3. Key Issues & Delays
-4. Approvals Needed
-5. Material or Supply Chain Notes
-6. Customer or Client Concerns
-7. Estimated Risks for Next Week
-8. Recommended Actions
-
-Write clearly, formally, and concisely.  
-The report should be suitable for a construction owner or operations executive.
-
-Return the final report as plain text.
-    """
+def _call_claude(prompt: str) -> str:
+    if not CLAUDE_API_KEY:
+        raise RuntimeError("Missing CLAUDE_API_KEY")
 
     resp = claude_client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=1200,
+        model=os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-latest"),
+        max_tokens=1400,
         temperature=0.2,
         messages=[{"role": "user", "content": prompt}],
     )
-
     return resp.content[0].text
 
-def generate_weekly_ai_report(user_id: str | None = None) -> Dict[str, Any]:
-    profile = get_default_user_profile() if user_id is None else get_user_profile_by_id(user_id)
 
-    emails = fetch_emails_last_7_days()   # for now still your mailbox
+def generate_weekly_ai_report(user_id: str | None = None) -> Dict[str, Any]:
+    profile = _pick_profile(user_id)
+    access_token = _get_delegated_access_token(profile)
+
+    emails = fetch_emails_last_7_days(access_token=access_token)
     conversations = group_emails_into_conversations(emails)
 
-    thread_status = classify_conversations(conversations, profile)
-
-    structured = extract_structured_items_gpt(conversations)
-    structured["python_thread_status"] = thread_status
-
-    final_report = generate_weekly_report_claude(structured)
+    prompt = _format_prompt(profile, conversations)
+    report_text = _call_claude(prompt)
 
     return {
-        "user_id": profile.id,
-        "email_count": len(emails),
+        "user_id": profile.user_id,
+        "email": profile.email,
+        "display_name": profile.display_name,
+        "generated_at": datetime.utcnow().isoformat(),
         "conversation_count": len(conversations),
-        "thread_status": thread_status,
-        "structured": structured,
-        "final_report": final_report,
+        "report_text": report_text,
     }
 
 
-def generate_and_email_weekly_report(to_addresses: list[str]) -> dict:
-    """
-    1. Generate the weekly AI report.
-    2. Email the final report text to the given recipients.
-    Returns the same dict as generate_weekly_ai_report, plus a 'sent_to' field.
-    """
-    result = generate_weekly_ai_report()
-    final_report_text = result["final_report"]
+def generate_and_email_weekly_report(
+    to_addresses: List[str],
+    user_id: str | None = None,
+) -> Dict[str, Any]:
+    profile = _pick_profile(user_id)
+    access_token = _get_delegated_access_token(profile)
 
-    subject = "Weekly Operations AI Report"
-    body_text = final_report_text
+    report = generate_weekly_ai_report(user_id=profile.user_id)
 
-    send_email(subject=subject, body_text=body_text, to_addresses=to_addresses)
+    subject = f"Weekly AI Report - {profile.display_name}"
+    body = report["report_text"]
 
-    result["sent_to"] = to_addresses
-    return result
+    send_email(
+        subject=subject,
+        body_text=body,
+        to_addresses=to_addresses,
+        access_token=access_token,
+    )
+
+    return {
+        "ok": True,
+        "sent_to": to_addresses,
+        "report_user": {"user_id": profile.user_id, "email": profile.email},
+    }

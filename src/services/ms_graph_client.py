@@ -1,7 +1,9 @@
 # src/services/ms_graph_client.py
 
+from __future__ import annotations
+
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import msal
 import requests
@@ -9,200 +11,111 @@ import requests
 TENANT_ID = os.getenv("MS_TENANT_ID")
 CLIENT_ID = os.getenv("MS_CLIENT_ID")
 CLIENT_SECRET = os.getenv("MS_CLIENT_SECRET")
-USER_ID = os.getenv("MS_GRAPH_USER_ID")
 
-AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
+# App-only fallback user (your older single-mailbox setup)
+APP_ONLY_USER_ID = os.getenv("MS_GRAPH_USER_ID")
+
+AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}" if TENANT_ID else ""
 SCOPE = ["https://graph.microsoft.com/.default"]
 GRAPH_URL = "https://graph.microsoft.com/v1.0"
 
 
-def _get_access_token() -> str:
+def _get_app_only_access_token() -> str:
     """
-    Get an application level access token using client credentials.
-    Uses the MS_* environment variables.
+    Application level access token using client credentials (older mode).
     """
     if not all([TENANT_ID, CLIENT_ID, CLIENT_SECRET]):
-        raise RuntimeError("Missing one or more MS_* environment variables")
+        raise RuntimeError("Missing one or more MS_* environment variables for app-only token")
 
     app = msal.ConfidentialClientApplication(
         CLIENT_ID,
         authority=AUTHORITY,
         client_credential=CLIENT_SECRET,
     )
-
-    result = app.acquire_token_silent(SCOPE, account=None)
-    if not result:
-        result = app.acquire_token_for_client(scopes=SCOPE)
-
+    result = app.acquire_token_for_client(scopes=SCOPE)
     if "access_token" not in result:
-        raise RuntimeError(f"Could not acquire token from MSAL: {result}")
-
+        raise RuntimeError(f"Failed to acquire app token: {result}")
     return result["access_token"]
 
 
-def get_recent_emails(top: int = 10) -> List[Dict[str, Any]]:
+def _graph_get(url: str, access_token: str) -> Dict[str, Any]:
+    headers = {"Authorization": f"Bearer {access_token}"}
+    resp = requests.get(url, headers=headers, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _graph_post(url: str, access_token: str, json_body: Dict[str, Any]) -> Dict[str, Any]:
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    resp = requests.post(url, headers=headers, json=json_body, timeout=30)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Graph POST failed ({resp.status_code}): {resp.text}")
+    return resp.json() if resp.text else {"ok": True}
+
+
+def get_me(access_token: str) -> Dict[str, Any]:
+    return _graph_get(f"{GRAPH_URL}/me", access_token)
+
+
+def get_recent_inbox_and_sent_emails(
+    top: int = 200,
+    access_token: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """
-    Fetch recent emails from the configured user's mailbox.
-    Returns a simplified list with subject, from, and received time.
+    If access_token is provided, uses delegated /me access (multi-user SaaS).
+    Otherwise falls back to app-only mode using /users/{APP_ONLY_USER_ID}.
     """
-    if not USER_ID:
-        raise RuntimeError("MS_GRAPH_USER_ID is not set")
+    if access_token:
+        base = f"{GRAPH_URL}/me"
+        token = access_token
+    else:
+        if not APP_ONLY_USER_ID:
+            raise RuntimeError("MS_GRAPH_USER_ID not set and no delegated access_token provided")
+        base = f"{GRAPH_URL}/users/{APP_ONLY_USER_ID}"
+        token = _get_app_only_access_token()
 
-    token = _get_access_token()
-
-    url = (
-        f"{GRAPH_URL}/users/{USER_ID}/messages"
-        f"?$top={top}&$orderby=receivedDateTime desc"
-    )
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-    }
-
-    response = requests.get(url, headers=headers, timeout=30)
-
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"Graph API error {response.status_code}: {response.text}"
-        )
-
-    items = response.json().get("value", [])
-
-    simplified: List[Dict[str, Any]] = []
-    for item in items:
-        simplified.append(
-            {
-                "id": item.get("id"),
-                "subject": item.get("subject"),
-                "from": (item.get("from") or {})
-                .get("emailAddress", {})
-                .get("address"),
-                "receivedDateTime": item.get("receivedDateTime"),
-            }
-        )
-
-    return simplified
-
-from typing import List, Dict, Any  # you probably already have this at the top
-
-def get_recent_inbox_and_sent_emails(top: int = 200) -> List[Dict[str, Any]]:
-    """
-    Fetch recent emails from both Inbox and Sent Items for the configured user.
-    Returns a combined list with basic thread information.
-    """
-    if not USER_ID:
-        raise RuntimeError("MS_GRAPH_USER_ID is not set")
-
-    token = _get_access_token()
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-    }
-
-    all_messages: List[Dict[str, Any]] = []
-
-    # Inbox
+    # Pull from Inbox and SentItems
     inbox_url = (
-        f"{GRAPH_URL}/users/{USER_ID}/mailFolders('Inbox')/messages"
+        f"{base}/mailFolders/Inbox/messages"
         f"?$top={top}&$orderby=receivedDateTime desc"
+        f"&$select=subject,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,conversationId,id"
     )
-    inbox_resp = requests.get(inbox_url, headers=headers, timeout=30)
-    if inbox_resp.status_code != 200:
-        raise RuntimeError(
-            f"Graph Inbox error {inbox_resp.status_code}: {inbox_resp.text}"
-        )
-    inbox_items = inbox_resp.json().get("value", [])
-
-    for item in inbox_items:
-        all_messages.append(
-            {
-                "id": item.get("id"),
-                "subject": item.get("subject"),
-                "from": (item.get("from") or {})
-                .get("emailAddress", {})
-                .get("address"),
-                "to": [
-                    (recip.get("emailAddress") or {}).get("address")
-                    for recip in item.get("toRecipients", [])
-                ],
-                "receivedDateTime": item.get("receivedDateTime"),
-                "sentDateTime": item.get("sentDateTime"),
-                "conversationId": item.get("conversationId"),
-                "bodyPreview": item.get("bodyPreview"),
-                "folder": "inbox",
-            }
-        )
-
-    # Sent Items
     sent_url = (
-        f"{GRAPH_URL}/users/{USER_ID}/mailFolders('SentItems')/messages"
+        f"{base}/mailFolders/SentItems/messages"
         f"?$top={top}&$orderby=sentDateTime desc"
+        f"&$select=subject,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,conversationId,id"
     )
-    sent_resp = requests.get(sent_url, headers=headers, timeout=30)
-    if sent_resp.status_code != 200:
-        raise RuntimeError(
-            f"Graph SentItems error {sent_resp.status_code}: {sent_resp.text}"
-        )
-    sent_items = sent_resp.json().get("value", [])
 
-    for item in sent_items:
-        all_messages.append(
-            {
-                "id": item.get("id"),
-                "subject": item.get("subject"),
-                "from": (item.get("from") or {})
-                .get("emailAddress", {})
-                .get("address"),
-                "to": [
-                    (recip.get("emailAddress") or {}).get("address")
-                    for recip in item.get("toRecipients", [])
-                ],
-                "receivedDateTime": item.get("receivedDateTime"),
-                "sentDateTime": item.get("sentDateTime"),
-                "conversationId": item.get("conversationId"),
-                "bodyPreview": item.get("bodyPreview"),
-                "folder": "sent",
-            }
-        )
+    inbox = _graph_get(inbox_url, token).get("value", [])
+    sent = _graph_get(sent_url, token).get("value", [])
+    return inbox + sent
 
-    return all_messages
 
-def send_email(subject: str, body_text: str, to_addresses: list[str]) -> None:
+def send_email(
+    subject: str,
+    body_text: str,
+    to_addresses: List[str],
+    access_token: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    Send an email using Microsoft Graph from the configured user.
-    Uses application permissions and MS_* environment variables.
+    If access_token is provided, sends from /me (multi-user).
+    Otherwise sends from the app-only user mailbox (older mode).
     """
-    if not USER_ID:
-        raise RuntimeError("MS_GRAPH_USER_ID is not set")
+    if access_token:
+        url = f"{GRAPH_URL}/me/sendMail"
+        token = access_token
+    else:
+        if not APP_ONLY_USER_ID:
+            raise RuntimeError("MS_GRAPH_USER_ID not set and no delegated access_token provided")
+        url = f"{GRAPH_URL}/users/{APP_ONLY_USER_ID}/sendMail"
+        token = _get_app_only_access_token()
 
-    token = _get_access_token()
-
-    url = f"{GRAPH_URL}/users/{USER_ID}/sendMail"
-
-    message = {
+    payload = {
         "message": {
             "subject": subject,
-            "body": {
-                "contentType": "Text",
-                "content": body_text,
-            },
-            "toRecipients": [
-                {"emailAddress": {"address": addr}} for addr in to_addresses
-            ],
+            "body": {"contentType": "Text", "content": body_text},
+            "toRecipients": [{"emailAddress": {"address": a}} for a in to_addresses],
         },
         "saveToSentItems": True,
     }
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-
-    response = requests.post(url, headers=headers, json=message, timeout=30)
-
-    if response.status_code not in (202, 200):
-        raise RuntimeError(
-            f"Graph sendMail error {response.status_code}: {response.text}"
-        )
+    return _graph_post(url, token, payload)
