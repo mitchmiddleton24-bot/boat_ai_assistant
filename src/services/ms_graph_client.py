@@ -119,3 +119,11 @@ def send_email(
         "saveToSentItems": True,
     }
     return _graph_post(url, token, payload)
+
+def get_recent_emails(top: int = 200):
+    """
+    Backward compatible wrapper for older imports.
+    Uses app-only fallback mode (MS_GRAPH_USER_ID) unless you pass a delegated token
+    through the newer function get_recent_inbox_and_sent_emails(...).
+    """
+    return get_recent_inbox_and_sent_emails(top=top, access_token=None)
